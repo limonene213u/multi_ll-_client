@@ -78,7 +78,7 @@
 
 ## **LLMのファイル構成例**
 
-Hugging Faceのモデルページから以下のモデルをDLしたと仮定して・・・
+Hugging Faceのモデルページから以下のモデルをDLしたと仮定して・・・  
 https://huggingface.co/rinna/nekomata-7b/tree/main
 
 ファイル構成例は以下の通りです。
