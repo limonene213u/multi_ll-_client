@@ -1,4 +1,3 @@
-// 必要なインポート
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -31,9 +30,9 @@ fn generate_default_config(path: &str) {
         "max_tokens": 128,
         "api_key": null
     }"#;
+
     let mut file = fs::File::create(path).expect("設定ファイルの作成に失敗しました");
-    file.write_all(default_config.as_bytes())
-        .expect("設定ファイルの書き込みに失敗しました");
+    file.write_all(default_config.as_bytes()).expect("設定ファイルの書き込みに失敗しました");
 }
 
 // 設定ファイルを読み込む関数（存在しない場合は自動生成）
@@ -48,41 +47,50 @@ fn load_config(path: &str) -> Config {
         .expect("JSONのパースに失敗しました")
 }
 
-// Pythonスクリプトを呼び出してローカル推論を実行する非同期関数
-async fn python_inference(prompt: &str, _config: &Config) -> String {
+// Pythonスクリプトを呼び出してローカル推論を実行する関数
+async fn python_inference<'a>(prompt: &'a str, config: &'a Config) -> String {
     let script_path = "./llm_interface.py"; // Pythonスクリプトのパス
+
     let output = Command::new("python")
         .arg(script_path)
         .arg(prompt)
         .output()
         .await;
+
     match output {
         Ok(output) => {
             if output.status.success() {
                 String::from_utf8_lossy(&output.stdout).trim().to_string()
             } else {
-                format!("Pythonスクリプトエラー: {}",
-                    String::from_utf8_lossy(&output.stderr))
+                format!(
+                    "Pythonスクリプトエラー: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                )
             }
         }
         Err(e) => format!("Pythonスクリプト呼び出しエラー: {:?}", e),
     }
 }
 
-// Ollama互換エンドポイントで推論を実行する非同期関数
-async fn ollama_inference(prompt: &str, config: &Config) -> String {
+// Ollama互換エンドポイントで推論を実行する関数
+async fn ollama_inference<'a>(prompt: &'a str, config: &'a Config) -> String {
     let endpoint = config.endpoint.as_deref().unwrap_or("http://localhost:11434/api/generate");
     let max_tokens = config.max_tokens.unwrap_or(64);
+
     let request_body = serde_json::json!({
         "model": config.model_name,
         "prompt": prompt,
         "max_tokens": max_tokens
     });
+
     let client = reqwest::Client::new();
     let res = client.post(endpoint).json(&request_body).send().await;
+
     match res {
         Ok(response) => {
             let text = response.text().await.unwrap_or_else(|_| "レスポンスの取得に失敗".to_string());
+
+            // JSONストリームを改行ごとに分割して、"response" の内容をつなげる
             let mut collected_response = String::new();
             for line in text.lines() {
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
@@ -91,6 +99,7 @@ async fn ollama_inference(prompt: &str, config: &Config) -> String {
                     }
                 }
             }
+
             if collected_response.is_empty() {
                 "Ollama推論エラー".to_string()
             } else {
@@ -101,40 +110,31 @@ async fn ollama_inference(prompt: &str, config: &Config) -> String {
     }
 }
 
-// --- 型定義と関数の分割 ---
-//
-// ここで、for<'a> を使って、任意のライフタイム 'a に対して返り値の Future が 'a を持つようにする
-type InferenceFn = for<'a> fn(String, &'a Config) -> Pin<Box<dyn Future<Output = String> + Send + 'a>>;
+// ライフタイム問題を解決するために分割
+type PythonInferenceFn = Box<dyn Fn(&str, &Config) -> Pin<Box<dyn Future<Output = String> + Send>> + Send + Sync>;
+type OllamaInferenceFn = Box<dyn Fn(&str, &Config) -> Pin<Box<dyn Future<Output = String> + Send>> + Send + Sync>;
 
-// infer_python と infer_ollama を定義
-fn infer_python<'a>(prompt: String, config: &'a Config) -> Pin<Box<dyn Future<Output = String> + Send + 'a>> {
-    Box::pin(async move {
-        python_inference(&prompt, config).await
-    })
-}
 
-fn infer_ollama<'a>(prompt: String, config: &'a Config) -> Pin<Box<dyn Future<Output = String> + Send + 'a>> {
-    Box::pin(async move {
-        ollama_inference(&prompt, config).await
-    })
-}
-
-// ローカル推論を実行する関数（フレームワーク選択）
 async fn local_inference(prompt: &str, config: &Config) -> String {
-    let frameworks: HashMap<&str, InferenceFn> = HashMap::from([
-        ("python", infer_python as InferenceFn),
-        ("ollama", infer_ollama as InferenceFn),
-    ]);
+    let python_fn: PythonInferenceFn = Box::new(|p, c| Box::pin(python_inference(p, c)));
+    let ollama_fn: OllamaInferenceFn = Box::new(|p, c| Box::pin(ollama_inference(p, c)));
+
+    let frameworks: HashMap<&str, Box<dyn Fn(&str, &Config) -> Pin<Box<dyn Future<Output = String> + Send>> + Send + Sync>> = HashMap::from([
+        ("python", Box::new(move |p, c| python_fn(p, c)) as Box<dyn Fn(&str, &Config) -> Pin<Box<dyn Future<Output = String> + Send>> + Send + Sync>),
+        ("ollama", Box::new(move |p, c| ollama_fn(p, c)) as Box<dyn Fn(&str, &Config) -> Pin<Box<dyn Future<Output = String> + Send>> + Send + Sync>),
+    ]); 
+
     if let Some(framework) = config.local_framework.as_deref() {
         if let Some(inference_fn) = frameworks.get(framework) {
-            return inference_fn(prompt.to_owned(), config).await;
+            return inference_fn(prompt.to_string(), config).await;
         }
-    }
+    }    
+
     "サポートされていないローカルフレームワークです".to_string()
 }
 
 // オンライン推論を実行する非同期関数
-async fn online_inference(config: &Config, prompt: &str) -> Result<String, reqwest::Error> {
+async fn ollama_inference<'a>(prompt: &'a str, config: &'a Config) -> String {
     let endpoint = config.endpoint.as_ref()
         .expect("オンライン推論用のendpointが設定されていません");
 
@@ -184,6 +184,7 @@ async fn online_inference(config: &Config, prompt: &str) -> Result<String, reqwe
 
 #[tokio::main]
 async fn main() {
+    // 設定ファイルからパラメータを読み込む
     let config_path = "config.json";
     let config = load_config(config_path);
 
@@ -208,6 +209,7 @@ async fn main() {
         }
         let prompt = prompt.trim();
 
+        // /bye を入力したらプログラムを終了する
         if prompt == "/bye" {
             println!("バイバイ！またね！");
             break;
@@ -217,6 +219,7 @@ async fn main() {
             break;
         }
 
+        // 推論処理の実行
         let response = if config.use_local_model {
             local_inference(prompt, &config).await
         } else {

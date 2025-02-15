@@ -1,7 +1,8 @@
 {
-  "model_name": "gemma:2b",
+  "model_name": "gemma2:9b",
   "endpoint": "http://localhost:11434/api/generate",
   "use_local_model": true,
+  "local_framework": "ollama",
   "openai_compatible": false,
   "max_tokens": 64,
   "api_key": null
