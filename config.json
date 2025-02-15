@@ -1,0 +1,8 @@
+{
+  "model_name": "gemma:2b",
+  "endpoint": "http://localhost:11434/api/generate",
+  "use_local_model": true,
+  "openai_compatible": false,
+  "max_tokens": 64,
+  "api_key": null
+}
